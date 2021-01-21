@@ -23,7 +23,7 @@ from torch.testing._internal.common_device_type import \
      onlyCPU, skipCUDAIf, skipCUDAIfNoMagma, skipCPUIfNoLapack, precisionOverride,
      skipCUDAIfNoMagmaAndNoCusolver, skipCUDAIfRocm, onlyOnCPUAndCUDA, dtypesIfCUDA,
      onlyCUDA)
-from torch.testing import floating_and_complex_types, floating_types
+from torch.testing import floating_and_complex_types, floating_types, all_types
 from torch.testing._internal.common_cuda import tf32_on_and_off, tf32_is_not_fp32
 from torch.testing._internal.jit_metaprogramming_utils import gen_script_fn_and_args
 from torch.autograd import gradcheck, gradgradcheck
@@ -2520,6 +2520,105 @@ class TestLinalg(TestCase):
 
         for params in [(1, 0), (2, 0), (2, 1), (4, 0), (4, 2), (10, 2)]:
             run_test_singular_input(*params)
+
+    @precisionOverride({torch.float32: 1e-3, torch.complex64: 1e-3, torch.float64: 1e-7, torch.complex128: 1e-7})
+    @skipCUDAIfNoMagma
+    @skipCPUIfNoLapack
+    @dtypes(torch.float32, torch.float64, torch.complex64, torch.complex128)
+    def test_pinv(self, device, dtype):
+        from torch.testing._internal.common_utils import random_hermitian_pd_matrix
+
+        def run_test_main(A, hermitian):
+            # Testing against definition for pseudo-inverses
+            A_pinv = torch.linalg.pinv(A, hermitian=hermitian)
+            if A.numel() > 0:
+                self.assertEqual(A, A @ A_pinv @ A, atol=self.precision, rtol=self.precision)
+                self.assertEqual(A_pinv, A_pinv @ A @ A_pinv, atol=self.precision, rtol=self.precision)
+                self.assertEqual(A @ A_pinv, (A @ A_pinv).conj().transpose(-2, -1))
+                self.assertEqual(A_pinv @ A, (A_pinv @ A).conj().transpose(-2, -1))
+            else:
+                self.assertEqual(A.shape, A_pinv.shape[:-2] + (A_pinv.shape[-1], A_pinv.shape[-2]))
+
+            # Check out= variant
+            out = torch.empty_like(A_pinv)
+            ans = torch.linalg.pinv(A, hermitian=hermitian, out=out)
+            self.assertEqual(ans, out)
+            self.assertEqual(ans, A_pinv)
+
+        def run_test_numpy(A, hermitian):
+            # Check against NumPy output
+            # Test float rcond, and specific value for each matrix
+            rconds = [float(torch.rand(1)), ]
+            # Test different types of rcond tensor
+            for rcond_type in all_types():
+                rconds.append(torch.rand(A.shape[:-2], dtype=torch.double, device=device).to(rcond_type))
+            # Test broadcasting of rcond
+            if A.ndim > 2:
+                rconds.append(torch.rand(A.shape[-3], device=device))
+            for rcond in rconds:
+                actual = torch.linalg.pinv(A, rcond=rcond, hermitian=hermitian)
+                numpy_rcond = rcond if isinstance(rcond, float) else rcond.cpu().numpy()
+                expected = np.linalg.pinv(A.cpu().numpy(), rcond=numpy_rcond, hermitian=hermitian)
+                self.assertEqual(actual, expected, atol=self.precision, rtol=1e-5)
+
+        for sizes in [(5, 5), (3, 5, 5), (3, 2, 5, 5),  # square matrices
+                      (3, 2), (5, 3, 2), (2, 5, 3, 2),  # fat matrices
+                      (2, 3), (5, 2, 3), (2, 5, 2, 3),  # thin matrices
+                      (0, 0), (0, 2), (2, 0), (3, 0, 0), (0, 3, 0), (0, 0, 3)]:  # zero numel matrices
+            A = torch.randn(*sizes, dtype=dtype, device=device)
+            hermitian = False
+            run_test_main(A, hermitian)
+            run_test_numpy(A, hermitian)
+
+        # Check hermitian = True
+        for sizes in [(5, 5), (3, 5, 5), (3, 2, 5, 5),  # square matrices
+                      (0, 0), (3, 0, 0), ]:  # zero numel square matrices
+            A = random_hermitian_pd_matrix(sizes[-1], *sizes[:-2], dtype=dtype, device=device)
+            hermitian = True
+            run_test_main(A, hermitian)
+            run_test_numpy(A, hermitian)
+
+    @skipCUDAIfNoMagma
+    @skipCPUIfNoLapack
+    @dtypes(torch.float32, torch.float64, torch.complex64, torch.complex128)
+    def test_pinv_errors_and_warnings(self, device, dtype):
+        # pinv requires at least 2D tensor
+        a = torch.randn(1, device=device, dtype=dtype)
+        with self.assertRaisesRegex(RuntimeError, "expected a tensor with 2 or more dimensions"):
+            torch.linalg.pinv(a)
+
+        # if non-empty out tensor with wrong shape is passed a warning is given
+        a = torch.randn(3, 3, dtype=dtype, device=device)
+        out = torch.empty(7, 7, dtype=dtype, device=device)
+        with warnings.catch_warnings(record=True) as w:
+            # Trigger warning
+            torch.linalg.pinv(a, out=out)
+            # Check warning occurs
+            self.assertEqual(len(w), 1)
+            self.assertTrue("An output with one or more elements was resized" in str(w[-1].message))
+
+        # dtypes of out and input should match
+        out = torch.empty_like(a).to(torch.int)
+        with self.assertRaisesRegex(RuntimeError, "dtype Int does not match the expected dtype"):
+            torch.linalg.pinv(a, out=out)
+
+        if torch.cuda.is_available():
+            # device of out and input should match
+            wrong_device = 'cpu' if self.device_type != 'cpu' else 'cuda'
+            out = torch.empty_like(a).to(wrong_device)
+            with self.assertRaisesRegex(RuntimeError, "Expected result and input to be on the same device"):
+                torch.linalg.pinv(a, out=out)
+
+            # device of rcond and input should match
+            wrong_device = 'cpu' if self.device_type != 'cpu' else 'cuda'
+            rcond = torch.full((), 1e-2, device=wrong_device)
+            with self.assertRaisesRegex(RuntimeError, "Expected rcond and input to be on the same device"):
+                torch.linalg.pinv(a, rcond=rcond)
+
+        # rcond can't be complex
+        rcond = torch.full((), 1j, device=device)
+        with self.assertRaisesRegex(RuntimeError, "rcond tensor of complex type is not supported"):
+            torch.linalg.pinv(a, rcond=rcond)
 
     @skipCUDAIfNoMagmaAndNoCusolver
     @skipCPUIfNoLapack
@@ -5519,6 +5618,107 @@ else:
         with self.assertRaisesRegex(RuntimeError, "chain_matmul: Expected one or more matrices"):
             torch.chain_matmul()
 
+    @skipCUDAIfNoMagma
+    @skipCPUIfNoLapack
+    @dtypes(torch.float32, torch.float64, torch.complex64, torch.complex128)
+    @precisionOverride({torch.float32: 1e-3, torch.complex64: 1e-3,
+                        torch.float64: 1e-8, torch.complex128: 1e-8})
+    def test_slogdet(self, device, dtype):
+        from torch.testing._internal.common_utils import (random_hermitian_matrix, random_hermitian_psd_matrix,
+                                                          random_hermitian_pd_matrix, random_square_matrix_of_rank)
+
+        # mat_chars denotes matrix characteristics
+        # possible values are: hermitian, hermitian_psd, hermitian_pd, singular, non_singular
+        def run_test(matsize, batchdims, mat_chars):
+            num_matrices = np.prod(batchdims)
+            list_of_matrices = []
+            if num_matrices != 0:
+                for idx in range(num_matrices):
+                    mat_type = idx % len(mat_chars)
+                    if mat_chars[mat_type] == 'hermitian':
+                        list_of_matrices.append(random_hermitian_matrix(matsize, dtype=dtype, device=device))
+                    elif mat_chars[mat_type] == 'hermitian_psd':
+                        list_of_matrices.append(random_hermitian_psd_matrix(matsize, dtype=dtype, device=device))
+                    elif mat_chars[mat_type] == 'hermitian_pd':
+                        list_of_matrices.append(random_hermitian_pd_matrix(matsize, dtype=dtype, device=device))
+                    elif mat_chars[mat_type] == 'singular':
+                        list_of_matrices.append(torch.ones(matsize, matsize, dtype=dtype, device=device))
+                    elif mat_chars[mat_type] == 'non_singular':
+                        list_of_matrices.append(random_square_matrix_of_rank(matsize, matsize, dtype=dtype, device=device))
+                full_tensor = torch.stack(list_of_matrices, dim=0).reshape(batchdims + (matsize, matsize))
+            else:
+                full_tensor = torch.randn(*batchdims, matsize, matsize, dtype=dtype, device=device)
+
+            actual_value = torch.linalg.slogdet(full_tensor)
+            expected_value = np.linalg.slogdet(full_tensor.cpu().numpy())
+            self.assertEqual(expected_value[0], actual_value[0], atol=self.precision, rtol=self.precision)
+            self.assertEqual(expected_value[1], actual_value[1], atol=self.precision, rtol=self.precision)
+
+            # test out=variant
+            sign_out = torch.empty_like(actual_value[0])
+            logabsdet_out = torch.empty_like(actual_value[1])
+            ans = torch.linalg.slogdet(full_tensor, out=(sign_out, logabsdet_out))
+            self.assertEqual(ans[0], sign_out)
+            self.assertEqual(ans[1], logabsdet_out)
+            self.assertEqual(sign_out, actual_value[0])
+            self.assertEqual(logabsdet_out, actual_value[1])
+
+        for matsize, batchdims in itertools.product([0, 3, 5], [(0,), (3,), (5, 3)]):
+            run_test(matsize, batchdims, mat_chars=['hermitian_pd'])
+            run_test(matsize, batchdims, mat_chars=['singular'])
+            run_test(matsize, batchdims, mat_chars=['non_singular'])
+            run_test(matsize, batchdims, mat_chars=['hermitian', 'hermitian_pd', 'hermitian_psd'])
+            run_test(matsize, batchdims, mat_chars=['singular', 'non_singular'])
+
+    @skipCUDAIfNoMagma
+    @skipCPUIfNoLapack
+    @dtypes(torch.float32, torch.float64, torch.complex64, torch.complex128)
+    def test_slogdet_errors_and_warnings(self, device, dtype):
+        # slogdet requires the input to be a square matrix or batch of square matrices
+        a = torch.randn(2, 3, device=device, dtype=dtype)
+        with self.assertRaisesRegex(RuntimeError, r'must be batches of square matrices'):
+            torch.linalg.slogdet(a)
+
+        # slogdet requires the input to be at least 2 dimensional tensor
+        a = torch.randn(2, device=device, dtype=dtype)
+        with self.assertRaisesRegex(RuntimeError, r'must have at least 2 dimensions'):
+            torch.linalg.slogdet(a)
+
+        # slogdet requires the input to be of float, double, cfloat or cdouble types
+        a = torch.randn(2, 2, device=device, dtype=torch.bfloat16)
+        with self.assertRaisesRegex(RuntimeError, r'of float, double, cfloat or cdouble types'):
+            torch.linalg.slogdet(a)
+
+        # if non-empty out tensor with wrong shape is passed a warning is given
+        a = torch.randn(2, 3, 3, device=device, dtype=dtype)
+        sign_out = torch.empty(1, device=device, dtype=dtype)
+        real_dtype = a.real.dtype if dtype.is_complex else dtype
+        logabsdet_out = torch.empty(1, device=device, dtype=real_dtype)
+        with warnings.catch_warnings(record=True) as w:
+            # Trigger warning
+            torch.linalg.slogdet(a, out=(sign_out, logabsdet_out))
+            # Check warning occurs
+            self.assertEqual(len(w), 1)
+            self.assertTrue("An output with one or more elements was resized" in str(w[-1].message))
+
+        # dtypes should match
+        sign_out = torch.empty_like(a).to(torch.int)
+        logabsdet_out = torch.empty_like(a).to(torch.int)
+        with self.assertRaisesRegex(RuntimeError, "sign dtype Int does not match input dtype"):
+            torch.linalg.slogdet(a, out=(sign_out, logabsdet_out))
+
+        sign_out = torch.empty(0, device=device, dtype=dtype)
+        with self.assertRaisesRegex(RuntimeError, "logabsdet dtype Int does not match the expected dtype"):
+            torch.linalg.slogdet(a, out=(sign_out, logabsdet_out))
+
+        # device should match
+        if torch.cuda.is_available():
+            wrong_device = 'cpu' if self.device_type != 'cpu' else 'cuda'
+            sign_out = torch.empty(0, device=wrong_device, dtype=dtype)
+            logabsdet_out = torch.empty(0, device=wrong_device, dtype=real_dtype)
+            with self.assertRaisesRegex(RuntimeError, "Expected sign, logabsdet and input to be on the same device"):
+                torch.linalg.slogdet(a, out=(sign_out, logabsdet_out))
+
     @slowTest
     @skipCUDAIfNoMagma
     @skipCPUIfNoLapack
@@ -5534,6 +5734,7 @@ else:
             det = M.det()
             logdet = M.logdet()
             sdet, logabsdet = M.slogdet()
+            linalg_sdet, linalg_logabsdet = torch.linalg.slogdet(M)
 
             # Test det
             self.assertEqual(det, target_sdet * target_logabsdet.exp(),
@@ -5544,6 +5745,8 @@ else:
             # precision issues when det is near zero.
             self.assertEqual(sdet * logabsdet.exp(), target_sdet * target_logabsdet.exp(),
                              atol=1e-7, rtol=0, msg='{} (slogdet)'.format(desc))
+            self.assertEqual(linalg_sdet * linalg_logabsdet.exp(), target_sdet * target_logabsdet.exp(),
+                             atol=1e-7, rtol=0, msg='{} (linalg_slogdet)'.format(desc))
 
             # Test logdet
             # Compare logdet against our own pytorch slogdet because they should
@@ -5717,13 +5920,13 @@ else:
             # Scaling adapted from `get_random_mat_scale` in _test_det_logdet_slogdet
             full_tensor *= (math.factorial(matsize - 1) ** (-1.0 / (2 * matsize)))
 
-            for fn in [torch.det, torch.logdet, torch.slogdet]:
+            for fn in [torch.det, torch.logdet, torch.slogdet, torch.linalg.slogdet]:
                 expected_value = []
                 actual_value = fn(full_tensor)
                 for full_idx in itertools.product(*map(lambda x: list(range(x)), batchdims)):
                     expected_value.append(fn(full_tensor[full_idx]))
 
-                if fn == torch.slogdet:
+                if fn == torch.slogdet or fn == torch.linalg.slogdet:
                     sign_value = torch.stack([tup[0] for tup in expected_value], dim=0).reshape(batchdims)
                     expected_value = torch.stack([tup[1] for tup in expected_value], dim=0).reshape(batchdims)
                     self.assertEqual(sign_value, actual_value[0])
