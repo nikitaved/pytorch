@@ -75,10 +75,35 @@ static inline int64_t matrixStride(const Tensor& batched_matrices) {
   return batched_matrices.size(-1) * batched_matrices.size(-2);
 }
 
-// we assume that `a` and `b` do not overlap, and moreover,
-// we expect that there exist tensors a_c and b_c such that
-// a = a_c.contiguous().transpose(-1, -2)
-// b = b_c.contiguous().transpose(-1, -2)
+// This function is designed to be used with linear algebra methods that minimize
+// L(ax - b) = 0, where L is generally the identity map (`solve`, for example)
+// or the L2 norm (`lstsq`).
+// It is expected that `a` and `b` are contiguous tensors of column-major matrices
+// (so that a.view({-1, a.size(-2), a.size(-1)}) succeeds, same for `b`),
+// with the following additional properties:
+//
+// 1. a.dim() == b.dim()
+// 2. a.shape[:-2] broadcasts over b.shape[:-2]
+// 3. a.size(i) <= b.size(i) for i=0,..., a.dim() - 3 (only for batch dimensions)
+//
+// MAGMA/LAPACK modify tensor `a` in-place, and the main goal of this method
+// is to be memory efficient, which means that if there exists an index i such that
+// a.shape[i] < b.shape[i], 0 <= i <= a.dim() - 3,
+// then instead of materializing copies of `a` in the broadcasted shape, we keep
+// a buffer copy of `a` along with flags that check whether specific batch dimension
+// indices for `a` were already accessed. If they were, we copy the data from the buffer
+// into `a`. The number of copies does not exceed 
+// prod(max(a.shape[:-2], b.shape[:-2]) - a.shape[:-2] + 1)
+// and this value is attained by tensors with non-empty batch dimensions.
+//
+// func_t `f` is a callable that is being supplied with
+// scalar_t* a_working_ptr, scalar_t* b_working_ptr, int64_t a_linear_batch_idx.
+// a_working_ptr and b_working_ptr can directly be passed to LAPACK/MAGMA routines,
+// and a_linear_batch_idx is an index in the 3d representation which corresponds to
+// the memory a_working_ptr points to, in other words:
+// a_working_ptr == a.view({-1, a.size(-2), a.size(-1)}.select(0, a_linear_batch_idx).data_ptr<scalar_t>();
+// a_linear_batch_idx is usefull to store metadata related to `a`, such as, for example,
+// its rank or singular values (see linalg_lstsq).
 template<typename scalar_t, typename func_t>
 void batch_iterator_with_broadcasting(const Tensor& a, const Tensor& b, const func_t& f) {
   IntArrayRef a_batch_sizes(a.sizes().data(), a.dim() - 2);
@@ -97,8 +122,8 @@ void batch_iterator_with_broadcasting(const Tensor& a, const Tensor& b, const fu
 
   auto m = a.size(-2);
   auto n = a.size(-1);
-  auto a_3d = a.view({-1, m, n});
-  auto b_3d = b.view({-1, b.size(-2), b.size(-1)});
+  auto a_3d = a.view({batchCount(a), m, n});
+  auto b_3d = b.view({batchCount(b), b.size(-2), b.size(-1)});
 
   auto a_broadcasts_over_b = (a_batch_sizes != b_batch_sizes);
   Tensor a_buffer, a_was_accessed, a_buffer_3d;
@@ -108,7 +133,7 @@ void batch_iterator_with_broadcasting(const Tensor& a, const Tensor& b, const fu
     a_buffer = at::empty_strided(a.sizes(), a.strides(), a.options())
       .copy_(a);
     a_was_accessed = at::zeros(batchCount(a), at::kBool);
-    a_buffer_3d = a_buffer.view({-1, m, n});
+    a_buffer_3d = a_buffer.view({batchCount(a), m, n});
     check_if_copy_needed_for_a = [&](int64_t a_curr_linear_batch_idx) {
       auto* a_was_accessed_flag = a_was_accessed
         .select(0, a_curr_linear_batch_idx)
@@ -312,7 +337,8 @@ static inline std::tuple<bool, bool> _parse_qr_mode(std::string mode) {
     compute_q = false;
     reduced = true; // this is actually irrelevant in this mode
   } else {
-    TORCH_CHECK(false, "Unrecognized mode '", mode, "'");
+      TORCH_CHECK(false, "qr received unrecognized mode '", mode,
+                  "' but expected one of 'reduced' (default), 'r', or 'complete'");
   }
   return std::make_tuple(compute_q, reduced);
 }
@@ -367,18 +393,21 @@ static inline std::tuple<Tensor, Tensor, Tensor> _create_U_S_VT(const Tensor& in
     U_empty = at::empty_strided(sizes, strides, input.options().device(at::kCPU));
   }
 
+  // VT should be a column-major or a batch of column-major matrices
   sizes[input.dim() - 2] = n;
   sizes[input.dim() - 1] = n;
-  // VT should be a row-major or a batch of row-major matrices
+  strides = at::detail::defaultStrides(sizes);
+  strides[input.dim() - 1] = n;
+  strides[input.dim() - 2] = 1;
   Tensor VT_empty;
   if (!input.is_cuda()) {
-    VT_empty = at::empty(sizes, input.options());
+    VT_empty = at::empty_strided(sizes, strides, input.options());
   } else {
     // NB: VT_empty is an empty tensor created on the CPU intentionally, because magma_(d/s)gesdd
     // (which is the driver routine for the divide and conquer SVD operation)
     // takes in arrays on the CPU as input. This routine is a hybrid CPU-GPU routine that
     // moves the inputs between devices internally.
-    VT_empty = at::empty(sizes, input.options().device(at::kCPU));
+    VT_empty = at::empty_strided(sizes, strides, input.options().device(at::kCPU));
   }
 
   sizes.pop_back();
