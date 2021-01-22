@@ -311,7 +311,7 @@ Examples::
 """)
 
 lstsq = _add_docstr(_linalg.linalg_lstsq, r"""
-torch.linalg.lstsq(input, b, cond=None, driver_name=None) -> (Tensor x, Tensor rank, Tensor s)
+torch.linalg.lstsq(input, b, cond=None, driver_name=None) -> (Tensor solution, Tensor residuals, Tensor rank, Tensor singular_values)
 
 Computes the least squares solution to the system with a batch of matrices :math:`a` (represented by :attr:`input`)
 and a batch of vectors/matrices :math:`b` such that
@@ -322,14 +322,9 @@ and a batch of vectors/matrices :math:`b` such that
 where :math:`a` is of size :math:`(..., m, n)` and :math:`b` is of size :math:`(..., m, k)` or
 :math:`(..., m)`. The batch dimensions of :math:`a` and :math:`b` have to be broadcastable.
 
-The returned solution :math:`solution` is of shape :math:`(..., \max(m, n), k)` if :math:`b` is of shape :math:`(..., m, k)`,
-and is of shape :math:`(..., \max(m, n), 1)` if :math:`b` is of shape :math:`(..., m)`.
+The returned solution :math:`solution` is of shape :math:`(..., n, k)` if :math:`b` is of shape :math:`(..., m, k)`,
+and is of shape :math:`(..., n, 1)` if :math:`b` is of shape :math:`(..., m)`.
 The batch sizes of :math:`x` is the broadcasted shape of the batch dimensions of :math:`a` and :math:`b`.
-The minimizer could be obtained by slicing the solution with, for example, ``x.narrow(-2, 0, n)``.
-The remaining entries ``x.narrow(-2, n, max(m, n) - n)``
-encode the residual sum of squares for the solution in each column for full-rank matrices in :math:`a`,
-i.e. if :math:`\text{rank}(a[..., :, :]) = \min(m, n)`, the residuals for the system :math:`a[..., :, :]` could be obtained by
-``residuals = x.narrow(-2, n, max(m, n) - n).pow(2).sum(-2)[..., :, :]``.
 
 .. note::
     The case when :math:`m < n` is not supported on the GPU yet.
@@ -360,8 +355,10 @@ Args:
     ``'gelsy'`` is the fastest among the rank-revealing algorithms that also handles rank-deficient inputs.
 
 Returns:
-    (Tensor, Tensor, Tensor): a namedtuple (x, rank, s) containing:
+    (Tensor, Tensor, Tensor, Tensor): a namedtuple (solution, residuals, rank, singular_values) containing:
         - **solution** (*Tensor*): the least squares solution
+        - **residuals** (*Tensor*):  if :math:`m > n` then for full rank matrices in :math:`a` the tensor encodes
+            the squared residuals of the solutions, that is :math:`||ax - b||_F^2`.
         - **rank** (*Tensor*): the tensor of ranks of the matrix :math:`a` with shape ``a.shape[:-2]``.
             Non-empty if :attr:`driver_name` is one of (``'gelsy'``, ``'gelsd'``, ``'gelss'``).
         - **singular_values** (*Tensor*): the tensor of singular values

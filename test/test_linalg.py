@@ -230,14 +230,14 @@ class TestLinalg(TestCase):
         b = torch.rand(2, 2, 3, 0, dtype=dtype, device=device)
         self.assertEqual(
             torch.linalg.lstsq(a, b)[0],
-            torch.zeros(2, 2, 3, 0, dtype=dtype, device=device)
+            torch.zeros(2, 2, 0, 0, dtype=dtype, device=device)
         )
         # empty a but not b
         a = torch.rand(2, 2, 3, 0, dtype=dtype, device=device)
         b = torch.rand(2, 2, 3, 2, dtype=dtype, device=device)
         self.assertEqual(
             torch.linalg.lstsq(a, b)[0],
-            torch.zeros(2, 2, 3, 2, dtype=dtype, device=device)
+            torch.zeros(2, 2, 0, 2, dtype=dtype, device=device)
         )
 
         a = torch.rand(2, 3, dtype=dtype, device=device)

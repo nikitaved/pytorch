@@ -44,7 +44,7 @@ inline Tensor& eigvalsh_out(Tensor& result, const Tensor& self, std::string uplo
   return torch::linalg_eigvalsh_out(result, self, uplo);
 }
 
-inline std::tuple<Tensor, Tensor, Tensor> lstsq(const Tensor& self, const Tensor& b, c10::optional<double> cond, c10::optional<std::string> driver_name) {
+inline std::tuple<Tensor, Tensor, Tensor, Tensor> lstsq(const Tensor& self, const Tensor& b, c10::optional<double> cond, c10::optional<std::string> driver_name) {
   return torch::linalg_lstsq(self, b, cond, driver_name);
 }
 
@@ -172,7 +172,7 @@ inline Tensor& eigvalsh_out(Tensor& result, const Tensor& self, std::string uplo
   return detail::eigvalsh_out(result, self, uplo);
 }
 
-inline std::tuple<Tensor, Tensor, Tensor> lstsq(const Tensor& self, const Tensor& b, c10::optional<double> cond, c10::optional<std::string> driver_name) {
+inline std::tuple<Tensor, Tensor, Tensor, Tensor> lstsq(const Tensor& self, const Tensor& b, c10::optional<double> cond, c10::optional<std::string> driver_name) {
   return detail::lstsq(self, b, cond, driver_name);
 }
 

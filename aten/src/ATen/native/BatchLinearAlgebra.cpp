@@ -2236,7 +2236,7 @@ std::tuple<Tensor, Tensor, Tensor> _lstsq_helper_cpu(
 #endif
 }
 
-std::tuple<Tensor, Tensor, Tensor> linalg_lstsq(
+std::tuple<Tensor, Tensor, Tensor, Tensor> linalg_lstsq(
     const Tensor& self, const Tensor& b,
     c10::optional<double> cond,
     c10::optional<std::string> driver_name) {
@@ -2331,18 +2331,20 @@ std::tuple<Tensor, Tensor, Tensor> linalg_lstsq(
     ? cond.value()
     : _get_epsilon(c10::toValueType(self.scalar_type()));
 
-  Tensor x, rank, singular_values;
+  Tensor x, residuals, rank, singular_values;
   // path if neither `self` nor `b` is empty
   if (self.numel() && b.numel()) {
     std::tie(x, rank, singular_values) =
       at::_lstsq_helper(self_working_copy, b_working_copy, rcond, driver_opt);
+    residuals = x.narrow(-2, n, std::max(m, n) - n).pow_(2).sum(-2);
+    x = x.narrow(-2, 0, n);
   }
   // if either `self` or `b` is empty, return an empty tensor or,
   // if non-zero sizes, return a tensor of zeros.
   else {
-    x = b_working_copy.zero_();
+    x = b_working_copy.zero_().narrow(-2, 0, n);
   }
-  return std::make_tuple(x, rank, singular_values);
+  return std::make_tuple(x, residuals, rank, singular_values);
 }
 
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ lu_solve ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
